@@ -1,0 +1,41 @@
+function openLearningFromReader(source,selection){window.learningSeed={sourceId:source.id,name:source.name,selection};openFeature('AI 导学')}
+function renderLearning(host, active=()=>true){
+  if(!host)history.replaceState(null,'','#learning');
+  const token=generation,live=()=>token===generation&&active(),seed=window.learningSeed;window.learningSeed=null;
+  let session=null,turns=[],busy=false;
+  const post=(action,body)=>api('/api/reader/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  (host||$('feature-view')).innerHTML=`<section class="panel"><div class="reading-heading"><div><h2>AI 导学</h2></div><button class="secondary" id="lc-new">新学习</button></div><div id="lc-setup"><p>每次学懂一点，再用回答检验理解。</p><div class="learn-modes"><label><input type="radio" name="learn-mode" value="teach" checked><strong>教我学</strong><span>简短讲解 → 理解题 → 针对性反馈</span></label><label><input type="radio" name="learn-mode" value="grill"><strong>考考我</strong><span>直接提问 → 找出漏洞 → 继续追问</span></label></div><label class="field">学习主题或目标<textarea id="lc-topic" maxlength="500" rows="2" placeholder="例如：理解现金流与利润的区别，并能解释一个简单案例"></textarea></label><div class="learn-settings"><label>起始难度 <select id="lc-level"><option>入门</option><option>进阶</option><option>深入</option></select></label><label>学习依据 <select id="lc-scope"><option value="topic">自由主题</option>${seed?'<option value="source" selected>当前阅读材料'+(seed.selection?'的选段':'')+'</option>':''}</select></label><button class="primary" id="lc-start">开始学习 →</button></div><p class="hint" id="lc-origin"></p></div><p id="lc-status" role="status"></p></section><div id="lc-work" hidden><div class="learn-workspace"><section class="panel"><h2 id="lc-title"></h2><p class="hint" id="lc-basis"></p><div id="lc-history" class="learn-history"></div><div id="lc-question" class="learn-question"></div><label class="field" id="lc-answer-label">你的回答<textarea id="lc-answer" rows="4" maxlength="4000" placeholder="用自己的话回答；不确定也可以说说你的思路。"></textarea></label><div class="learn-actions"><button id="lc-retry" class="primary" hidden>重试第一轮</button><button id="lc-answer-send" class="primary">提交回答 →</button><button id="lc-hint" class="secondary">给我提示</button><button id="lc-explain" class="secondary">讲解这题</button><button id="lc-recap" class="secondary">总结薄弱点</button><button id="lc-continue" class="primary" hidden>继续学习 →</button></div></section><section class="panel"><h2>学习记录</h2><div id="lc-progress"></div><p class="hint">理解情况由 AI 根据本次作答判断，不代表正式测评。</p><button id="lc-export" class="secondary">导出学习记录</button></section></div></div>`;
+  const status=s=>{if(live())$('lc-status').textContent=s};
+  function lock(value){busy=value;if(!live())return;['lc-new','lc-start','lc-retry','lc-answer-send','lc-hint','lc-explain','lc-recap','lc-continue','lc-topic','lc-level','lc-scope'].forEach(id=>$(id).disabled=value);document.querySelectorAll('[name=learn-mode]').forEach(x=>x.disabled=value)}
+  if(seed){$('lc-origin').textContent='材料：'+seed.name+ (seed.selection?' · 已选片段':'' );$('lc-topic').value='理解这份材料的核心观点及依据'}
+  function render(){
+    $('lc-setup').hidden=true;$('lc-work').hidden=false;$('lc-title').textContent=session.name;
+    $('lc-basis').textContent=session.learning.origin?'依据当前材料教学，点击每轮依据可回到阅读原文。':'基于模型已有知识；未联网核验，实时数据与最新规定请提供可信材料。';
+    const historyBox=$('lc-history');historyBox.replaceChildren();
+    turns.forEach((r,i)=>{const card=document.createElement('article');card.className='reading-answer';card.append(text('small',`第 ${i+1} 轮 · ${r.mode} · ${r.coaching.difficulty}`));if(r.action==='answer')card.append(text('blockquote','你的回答：'+r.question));if(r.coaching.lesson)card.append(text('p',r.coaching.lesson));if(r.coaching.feedback)card.append(text('p',r.coaching.feedback));if(r.coaching.nextQuestion)card.append(text('p','提问：'+r.coaching.nextQuestion));
+      if(r.citations.length){const detail=document.createElement('details');detail.append(text('summary','查看材料依据（可能含答案）'));r.citations.forEach(c=>{const b=text('button',c.location+' · '+c.quote.slice(0,50));b.className='reading-citation';b.onclick=()=>{window.readerFocus={sid:session.learning.origin,citation:c};openFeature('阅读助手')};detail.append(b)});card.append(detail)}historyBox.append(card)});
+    const last=turns.at(-1),c=last?.coaching,q=c?.nextQuestion;$('lc-retry').hidden=!!turns.length;
+    $('lc-question').textContent=q?'轮到你了：'+q:turns.length?'本轮学习总结已完成，可继续练习。':'准备开始第一轮学习。';
+    ['lc-answer-label','lc-answer-send','lc-hint','lc-explain'].forEach(id=>$(id).hidden=!q);$('lc-continue').hidden=!!q||!turns.length;$('lc-recap').hidden=!turns.length;
+    const progress=$('lc-progress');progress.replaceChildren(text('p','已作答 '+turns.filter(x=>x.action==='answer').length+' 次'),text('p','本轮反馈：'+(c?.assessment||'未作答')));
+    for(const [label,items]of [['已展示理解',c?.mastered||[]],['待巩固',c?.gaps||[]]]){progress.append(text('h3',label));const ul=document.createElement('ul');(items.length?items:['尚无足够作答依据']).forEach(x=>ul.append(text('li',x)));progress.append(ul)}
+  }
+  async function pollLearning(id){
+    if(!live())return;try{const job=await api('/api/tasks/'+id);if(!live())return;
+      if(job.status==='completed'){if(!job.readerResult?.coaching)throw Error('未返回有效教学结果');if(!turns.some(x=>x.taskId===id))turns.push(job.readerResult);localStorage.removeItem('zhixi-learning-pending');render();$('lc-answer').value='';status('已完成本轮。按自己的理解回答即可。');lock(false);return}
+      if(['failed','interrupted'].includes(job.status)){localStorage.removeItem('zhixi-learning-pending');throw Error(job.result||'本轮未完成，请重试')}
+      status('AI 正在准备讲解或分析你的回答…');poll=setTimeout(()=>pollLearning(id),1800);
+    }catch(e){status(e.message);lock(false);if(!turns.length)$('lc-retry').hidden=false}
+  }
+  async function send(action){
+    if(busy||!session)return;const answer=$('lc-answer').value.trim();if(action==='answer'&&!answer)return status('请先填写你的回答');lock(true);status('正在提交…');
+    try{const job=await post('ask',{sid:session.id,action,question:answer,previousTask:turns.at(-1)?.taskId||null});if(!live())return;localStorage.setItem('zhixi-learning-pending',JSON.stringify({sid:session.id,id:job.id}));pollLearning(job.id)}catch(e){status(e.message);lock(false)}
+  }
+  $('lc-retry').onclick=()=>send('start');
+  $('lc-start').onclick=async()=>{if(busy)return;if(session&&!turns.length)return send('start');const topic=$('lc-topic').value.trim();if(!topic)return status('请填写学习主题或目标');lock(true);try{session=await post('learn',{topic,mode:document.querySelector('[name=learn-mode]:checked').value,level:$('lc-level').value,sourceId:$('lc-scope').value==='source'?seed?.sourceId:null,selection:$('lc-scope').value==='source'?seed?.selection:null});if(!live())return;localStorage.setItem('zhixi-learning',session.id);render();lock(false);await send('start')}catch(e){status(e.message);lock(false)}};
+  for(const action of ['answer','hint','explain','recap','continue'])$(action==='answer'?'lc-answer-send':'lc-'+action).onclick=()=>send(action);
+  $('lc-new').onclick=()=>{localStorage.removeItem('zhixi-learning');if(host){window.learningSeed=seed;renderLearning(host,active)}else{generation++;clearTimeout(poll);renderLearning()}};
+  $('lc-export').onclick=()=>{const content='# '+session.name+'\n\n'+$('lc-basis').textContent+'\n\n'+turns.map(r=>'## '+r.question+'\n\n'+r.answer+'\n\n'+r.citations.map(c=>'依据：'+c.location+'\n> '+c.quote).join('\n')).join('\n\n');const u=URL.createObjectURL(new Blob([content],{type:'text/markdown;charset=utf-8'})),a=document.createElement('a');a.href=u;a.download='学习记录.md';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)};
+  const saved=!seed&&localStorage.getItem('zhixi-learning');if(saved){lock(true);api('/api/reader/state/'+encodeURIComponent(saved)).then(s=>{if(!live())return;if(!s.learning)throw Error('不是学习记录');session=s;turns=s.history;render();lock(false);let p;try{p=JSON.parse(localStorage.getItem('zhixi-learning-pending'))}catch{}if(p?.sid===saved&&!turns.some(t=>t.taskId===p.id)){lock(true);pollLearning(p.id)}else if(!turns.length){$('lc-retry').hidden=false;status('第一轮尚未完成，可以重试。')}}).catch(e=>{status(e.message);lock(false)})}
+}
+if(location.hash==='#learning'){openModule(modules.find(m=>m.id==='knowledge'));openFeature('AI 导学')}

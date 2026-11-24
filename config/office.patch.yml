@@ -1,0 +1,13 @@
+- insert:
+    - id: skill
+      name: '@deepseek-ai/dsh-skill'
+    - id: skill-filesystem
+      name: '@deepseek-ai/dsh-skill-filesystem'
+    - id: skill-office
+      name: '@deepseek-ai/dsh-skill-office'
+    - id: tool-skill
+      name: '@deepseek-ai/dsh-tool-skill'
+    - id: tool-office
+      name: '@deepseek-ai/dsh-tool-office'
+    - id: office-kit
+      name: '@deepseek-ai/dsh-office-kit'
