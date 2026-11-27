@@ -3,51 +3,40 @@ import {createRoot} from 'react-dom/client';
 import {CopilotKitProvider,CopilotChat,useAgent} from '@copilotkit/react-core/v2';
 import {HttpAgent} from '@ag-ui/client';
 import '@copilotkit/react-core/v2/styles.css';
+const params=new URLSearchParams(location.search);
+const research=params.get('mode')==='research';
+const library=research?'/api/research-plans':'/api/workshop-library';
+const storageKey=research?'zhixi-research-planning':'zhixi-workshop-chat';
+const page='/workshop-chat.html'+(research?'?mode=research':'');
+const markdown=window.markdownit({html:false,linkify:false});
 let threadId,agent;
+async function request(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const value=await r.json();if(!r.ok)throw Error(value.error||'请求失败');return value}
+function QuestionCard({batch,chat,onDone}){
+ const [answers,setAnswers]=React.useState({}),[error,setError]=React.useState(''),[busy,setBusy]=React.useState(false);
+ const update=(id,part)=>setAnswers(current=>({...current,[id]:{...current[id],...part}}));
+ async function submit(event){event.preventDefault();setBusy(true);setError('');try{await request('/api/planning-answer',{threadId:(chat.state?.workshopThread||threadId).replaceAll('-',''),requestId:batch.requestId,answers:batch.questions.map(q=>({id:q.id,selected:answers[q.id]?.selected||[],custom:answers[q.id]?.custom||''}))});onDone()}catch(e){setError(e.message)}finally{setBusy(false)}}
+ return <form className="question-card" onSubmit={submit}><strong>一起确定关键选择</strong>{batch.questions.map(q=><fieldset key={q.id}><legend>{q.question}</legend>{q.detail&&<div className="plan-text" dangerouslySetInnerHTML={{__html:markdown.render(q.detail)}}/>}{(q.options||[]).map((option,i)=><label className="question-option" key={option.label}><input type={q.multiSelect?"checkbox":"radio"} name={q.id} checked={answers[q.id]?.selected?.includes(option.label)||false} onChange={()=>update(q.id,{selected:q.multiSelect?(answers[q.id]?.selected?.includes(option.label)?answers[q.id].selected.filter(x=>x!==option.label):[...(answers[q.id]?.selected||[]),option.label]):[option.label],...(!q.multiSelect?{custom:''}:{})})}/><span><b>{option.label}</b>{(option.recommended===true||/recommended|推荐/i.test(option.label))&&<small>推荐</small>}<p>{option.description}</p></span></label>)}<label>补充说明或自己的选择<textarea rows="2" value={answers[q.id]?.custom||''} onChange={e=>update(q.id,{custom:e.target.value,...(!q.multiSelect?{selected:[]}:{})})}/></label></fieldset>)}{error&&<p role="alert">{error}</p>}<button disabled={busy} type="submit">{busy?'正在提交…':'提交回答，继续规划'}</button></form>
+}
 function Workshop(){
- const {agent:chat}=useAgent({agentId:'workshop'});
- const state=chat.state||{};
- const [added,setAdded]=React.useState(!!state.saved);
- async function save(){
-   try{
-     const r=await fetch('/api/workshop-library/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:state.workshopThread||threadId})});
-     if(!r.ok)throw Error((await r.json()).error);
-     setAdded(true);
-   }catch(e){setError(e.message)}
- }
- function fresh(){localStorage.removeItem('zhixi-workshop-chat');location.replace('/workshop-chat.html')}
- const [sample,setSample]=React.useState('');
- const [error,setError]=React.useState('');
- const [stage,setStage]=React.useState('');
- const [pending,setPending]=React.useState(false);
- const inFlight=React.useRef(false);
- async function act(props){
-   if(inFlight.current || chat.isRunning)return;
-   inFlight.current=true;
-   setPending(true);setStage('正在准备…');
-   setError('');
-   try{
-     await chat.runAgent({forwardedProps:props},{
-       onCustomEvent:({event})=>{if(event.name==='workshopProgress')setStage(event.value)},
-       onRunErrorEvent:({event})=>setError(event.message || '本次操作未完成，请重试。')
-     });
-   }catch(e){setError(e.message || '连接中断，请重试。')}
-   finally{inFlight.current=false;setPending(false)}
- }
- React.useEffect(()=>{localStorage.setItem('zhixi-workshop-chat',JSON.stringify({threadId,messages:chat.messages,state}));if(state.workshopThread)localStorage.setItem('zhixi-chat-'+state.workshopThread,JSON.stringify(chat.messages));},[chat.messages,state]);
- return <><header className="chat-actions"><button disabled={pending||chat.isRunning} onClick={fresh}>新对话</button>{(state.localApp||state.artifact)&&<button disabled={added} onClick={save}>{added?'已加入我的工具':'加入我的工具'}</button>}</header><main><section><CopilotChat agentId="workshop" labels={{welcomeMessageText:'有什么想法？和我聊聊。',chatInputPlaceholder:'说说你希望 AI 帮你做什么…'}}/></section>{state.plan&&<aside className={state.localApp?'app-preview':''}><h2>{state.localApp?.name||(state.artifact?'我的工作方法':'当前方案')}</h2>{state.localApp?<details><summary>查看方案</summary><p>{state.plan}</p></details>:<p>{state.plan}</p>}{state.localApp&&<a href={state.localApp.preview} target="_blank" rel="noreferrer">打开应用预览</a>}{state.localApp&&<iframe style={{width:"100%",height:"64vh",border:0}} title="应用预览" src={state.localApp.preview}/>}{state.artifact?<div><p>已保存 · {state.name}</p><label>试用材料<textarea value={sample} onChange={e=>setSample(e.target.value)}/></label><button disabled={!sample.trim()||pending||chat.isRunning} onClick={()=>act({sample})}>{pending?'正在试运行…':'试运行'}</button>{state.sampleResult&&<p>{state.sampleResult}</p>}<p><a href={'/api/workshop/zip/'+state.artifact}>下载工作方法</a></p></div>:!state.localApp&&state.ready&&<button disabled={pending||chat.isRunning} onClick={()=>act({create:true})}>{pending?stage:error?'重新创建':'开始创建'}</button>}{error&&<p role="alert">{error}</p>}</aside>}</main></>
+ const {agent:chat}=useAgent({agentId:'workshop'}),state=chat.state||{};
+ const [notice,setNotice]=React.useState(''),[phase,setPhase]=React.useState(''),[error,setError]=React.useState('');
+ const [question,setQuestion]=React.useState(null),[drafts,setDrafts]=React.useState([]),[snapshot,setSnapshot]=React.useState(null),[tab,setTab]=React.useState('draft');
+ React.useEffect(()=>{const sub=chat.subscribe({onRunStartedEvent:({event})=>{chat.workshopRunId=event.runId;setError('');setSnapshot(null);setPhase('正在启动规划…')},onCustomEvent:({event})=>{if(event.name==='planning.phase')setPhase(event.value.label);if(event.name==='planning.question')setQuestion(event.value);if(event.name==='planning.question.closed')setQuestion(null)},onRunErrorEvent:({event})=>{setError(event.message||'未收到回复，请重试。');setQuestion(null)},onRunFinishedEvent:()=>setQuestion(null)});return()=>sub.unsubscribe()},[chat]);
+ React.useEffect(()=>{fetch(library).then(r=>r.json()).then(setDrafts).catch(()=>setError('历史草稿加载失败'))},[state.version]);
+ React.useEffect(()=>{try{localStorage.setItem(storageKey,JSON.stringify({threadId,messages:chat.messages,state}))}catch{setNotice('本机缓存空间不足，方案仍保存在服务器。')}},[chat.messages,state]);
+ const ready=state.ready&&state.review?.passed===true&&!chat.isRunning,shown=snapshot||state;
+ async function retry(){setError('');try{await chat.runAgent()}catch(e){setError(e.message)}}
+ async function send(content){chat.addMessage({id:crypto.randomUUID(),role:'user',content});await retry()}
+ function fresh(){localStorage.removeItem(storageKey);location.replace(page)}
+ function download(content=shown.plan,suffix='.md'){const url=URL.createObjectURL(new Blob([content],{type:suffix==='.json'?'application/json':'text/markdown;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=(shown.title||'方案')+'-v'+(shown.version||'草稿')+suffix;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);setNotice('文件已导出。')}
+ async function copy(){try{await navigator.clipboard.writeText(shown.plan);setNotice('方案已复制。')}catch{setNotice('复制失败，请下载文件。')}}
+ const [execution,setExecution]=React.useState(null);
+ React.useEffect(()=>{if(!execution?.id||!['queued','running'].includes(execution.status))return;const timer=setTimeout(async()=>{try{const r=await fetch('/api/tasks/'+execution.id);if(!r.ok)throw Error();setExecution(await r.json())}catch{setExecution({...execution,status:'failed',result:'暂时无法获取进度，可再次打开执行任务。'})}},1800);return()=>clearTimeout(timer)},[execution]);
+ async function executeResearch(){setError('');try{setExecution(await request('/api/planned-research',{threadId:state.workshopThread,version:state.version}))}catch(e){setError(e.message)}}
+ async function confirm(){try{const result=await request('/api/planning-confirm',{threadId:state.workshopThread,version:state.version,research});chat.setState(result);setNotice('已确认当前版本，可以交付执行。')}catch(e){setError(e.message)}}
+ async function version(value){if(!value){setSnapshot(null);return}try{const r=await fetch(library+'/'+state.workshopThread+'/versions/'+value);if(!r.ok)throw Error('版本加载失败');setSnapshot(await r.json())}catch(e){setError(e.message)}}
+ return <><header className="chat-actions"><select aria-label="继续历史方案" value="" disabled={chat.isRunning} onChange={e=>location.assign(page+(research?'&':'?')+'thread='+encodeURIComponent(e.target.value))}><option value="">继续历史方案</option>{drafts.map(d=><option key={d.id} value={d.id}>{d.title}</option>)}</select><span role="status">{notice}</span><button disabled={chat.isRunning} onClick={fresh}>新建方案</button></header><main><section className="conversation"><div className="planning-heading"><h1>{research?'研究规划':'方案共创'}</h1></div>{chat.isRunning&&<div className="turn-status" role="status">{phase}</div>}{error&&<div className="turn-error" role="alert">{error} <button disabled={chat.isRunning} onClick={retry}>重试</button></div>}{!chat.messages.length&&<div className="planning-starters">{(params.get('idea')?[params.get('idea')]:research?['比较招商银行与工商银行近三年盈利质量，规划研究框架','研究香港银行净息差变化及其驱动因素']:['设计一个自动整理会议纪要和行动项的 Skill','规划一个可追溯的金融研究资料看板']).map(idea=><button key={idea} onClick={()=>send(idea)}>{idea}</button>)}</div>}<div className="chat-body"><CopilotChat agentId="workshop" labels={{welcomeMessageText:research?'从一个值得研究的问题开始':'把你的想法变成可执行方案',chatInputPlaceholder:'输入想法、材料或修改意见…'}}/></div>{question&&<QuestionCard key={question.requestId} batch={question} chat={chat} onDone={()=>setQuestion(null)}/>}<div className="conversation-tools"><button disabled={chat.isRunning||!chat.messages.length} onClick={()=>send('请根据目前讨论立刻制作完整方案。自行确定可合理推断的默认值并记录假设，先调查、生成，再独立审查。')}>立刻制作方案</button><span>讨论与草稿自动保存</span></div></section><aside className="plan-pane"><div className="plan-header"><strong>{snapshot?'历史版本':'方案草稿'}</strong>{state.version&&<select aria-label="查看方案版本" value={snapshot?.version||''} onChange={e=>version(e.target.value)}><option value="">当前 v{state.version}</option>{(state.versions||[]).slice().reverse().map(v=><option key={v.version} value={v.version}>v{v.version} · {v.createdAt}</option>)}</select>}</div><nav className="plan-tabs" aria-label="方案详情">{[['draft','完整方案'],['review','质量审查'],['evidence','调查依据'],['decisions','决策记录']].map(([key,label])=><button key={key} aria-pressed={tab===key} onClick={()=>setTab(key)}>{label}</button>)}</nav><div className="plan-content">{!shown.plan?<p className="plan-empty">生成方案后，可在此查看草稿、依据和审查结果。</p>:<><small>{shown.confirmed?'已确认交付':shown.ready&&shown.review?.passed===true?'审查通过 · 待你确认':'讨论中的草稿'}</small><h2>{shown.title}</h2>{tab==='draft'&&<div className="plan-text" dangerouslySetInnerHTML={{__html:markdown.render(shown.plan.replace(/^# [^\n]+\n/,''))}}/>}{tab==='review'&&<><p>{shown.review?.summary||'独立审查尚未完成。'}</p>{shown.review?.issues?.map((item,i)=><article className="review-item" key={i}><strong>{item.severity==='blocking'?'需要修订':'建议完善'} · {item.section}</strong><p>{item.problem}</p><p>{item.fix}</p></article>)}</>}{tab==='evidence'&&<>{(shown.evidence||[]).map((item,i)=><details key={i}><summary>{item.status==='verified'?'已获取':'未获取'} · {item.request.query||item.request.url||item.request.path||item.request.tool}</summary><pre>{JSON.stringify(item.result||item.error,null,2)}</pre></details>)}<details><summary>本轮使用的专业方法</summary><ul>{shown.methods?.map(name=><li key={name}>{name}</li>)}</ul></details></>}{tab==='decisions'&&(shown.decisions||[]).map((item,i)=><article key={i}><h3>{item.question}</h3><p>{item.choice}</p><p>{item.reason}</p><small>{item.status}</small></article>)}</>}</div>{shown.plan&&<footer><button disabled={chat.isRunning} onClick={()=>download()}>导出 Markdown</button><button disabled={chat.isRunning} onClick={copy}>复制</button>{research&&shown.research_plan&&<button onClick={()=>download(JSON.stringify(shown.research_plan,null,2),'.json')}>导出执行计划</button>}{research&&!snapshot&&<a href={library+'/'+state.workshopThread+'/docx'}>Word</a>}{research&&!snapshot&&state.confirmed&&<a href={library+'/'+state.workshopThread+'/handoff'}>下载深度研究交接包</a>}{research&&!snapshot&&state.confirmed&&<button disabled={['queued','running'].includes(execution?.status)} onClick={executeResearch}>执行逐章研究</button>}{execution&&<span role="status">{execution.result||'等待执行…'}{execution.artifacts?.map(name=><a key={name} href={'/download/'+execution.id+'/'+encodeURIComponent(name)}>{name}</a>)}</span>}<button className="confirm-plan" disabled={!ready||!!snapshot||state.confirmed} onClick={confirm}>{state.confirmed?'已确认当前版本':'确认并交付此版本'}</button></footer>}</aside></main></>
 }
-async function start(){
- let saved=JSON.parse(localStorage.getItem('zhixi-workshop-chat')||'{}');
- const id=new URLSearchParams(location.search).get('thread')||saved.state?.workshopThread;
- if(id){
-   const r=await fetch('/api/workshop-library/'+encodeURIComponent(id));
-   if(r.ok){const state=await r.json();saved={threadId:id,state,messages:JSON.parse(localStorage.getItem('zhixi-chat-'+id)||'null')||(saved.state?.workshopThread===id?saved.messages:[])}} 
- }
- threadId=saved.threadId||crypto.randomUUID();
- agent=new HttpAgent({url:'/api/workshop-chat',threadId,initialMessages:saved.messages||[],initialState:saved.state||{}});
- createRoot(document.getElementById('root')).render(<CopilotKitProvider agents__unsafe_dev_only={{workshop:agent}}><Workshop/></CopilotKitProvider>);
-
-
-}
-start();
+class WorkshopAgent extends HttpAgent{abortRun(){if(this.workshopRunId)fetch('/api/workshop-stop',{method:'POST',body:JSON.stringify({runId:this.workshopRunId})}).catch(()=>{});super.abortRun()}clone(){const copy=super.clone();Object.setPrototypeOf(copy,WorkshopAgent.prototype);return copy}}
+async function start(){let saved={};try{saved=JSON.parse(localStorage.getItem(storageKey)||'{}')}catch{}if(params.has('idea'))saved={};const id=params.get('thread')||saved.state?.workshopThread;if(id){const r=await fetch(library+'/'+encodeURIComponent(id));if(r.ok){const state=await r.json();saved={threadId:id,state,messages:state.messages||[]}}}threadId=saved.threadId||crypto.randomUUID();agent=new WorkshopAgent({url:research?'/api/research-plan-chat':'/api/workshop-chat',threadId,initialMessages:saved.messages||[],initialState:saved.state||{}});createRoot(document.getElementById('root')).render(<CopilotKitProvider agents__unsafe_dev_only={{workshop:agent}}><Workshop/></CopilotKitProvider>)}
+start().catch(()=>{document.getElementById('root').textContent='方案工作区暂时无法打开，请刷新重试。'});

@@ -2,6 +2,7 @@ const researchMarkdown = window.markdownit({html:false, breaks:true});
 function displayResearchReport(element, content) {
   element.classList.add('research-report');
   element.innerHTML = researchMarkdown.render(content);
+  if(window.enhanceFinancialTables)enhanceFinancialTables(element);
   for (const link of element.querySelectorAll('a[href]')) {
     link.target = '_blank';
     link.rel = 'noopener noreferrer';

@@ -10,6 +10,13 @@ model_url, model_name, model_key = model_settings()
 job=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
 workspace=ROOT/'data/tasks'/job['id']
 # Run confirmed file operations inside the configured worker process.
+if job.get('plannedResearch'):
+    from planned_research import run
+    try:run(job,workspace)
+    except Exception as error:
+        (workspace/'research-error.json').write_text(json.dumps({'error':str(error) if isinstance(error,ValueError) else '逐章研究中断，已完成章节保留。'},ensure_ascii=False),'utf8')
+        raise
+    sys.exit(0)
 if job.get('quickResearch'):
     from financial_quick_research import run
     try:

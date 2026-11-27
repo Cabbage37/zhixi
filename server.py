@@ -5,9 +5,6 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'.runtime/python'))
-for line in (ROOT/'.env').read_text(encoding='utf-8-sig').splitlines() if (ROOT/'.env').exists() else []:
-    if '=' in line and not line.strip().startswith('#'):
-        k,v=line.split('=',1); os.environ[k.strip()]=v.strip()
 for line in (ROOT/'.env.vision').read_text(encoding='utf-8-sig').splitlines() if (ROOT/'.env.vision').exists() else []:
     if '=' in line and not line.strip().startswith('#'):
         k,v=line.split('=',1)
@@ -58,7 +55,7 @@ def execute(job):
     p=DATA/'tasks'/job['id']/'task.json'
     try:
         job['status']='running'; save(p,job)
-        result=subprocess.run([sys.executable,str(ROOT/'worker.py'),str(p)],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=3600 if job.get('comparison') else 1800 if job.get('monitorId') else 600)
+        result=subprocess.run([sys.executable,str(ROOT/'worker.py'),str(p)],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=3600 if job.get('comparison') or job.get('plannedResearch') else 1800 if job.get('monitorId') else 600)
         job['status']='completed' if result.returncode==0 else 'failed'
         job['result']=result.stdout[-24000:] if result.returncode==0 else 'Agent 执行失败，请检查运行配置。'
         events=p.parent/'agent-events.json'
@@ -66,7 +63,7 @@ def execute(job):
             for event in read(events).get('events',[]):
                 if event.get('type')=='turn/end':
                     error=event.get('data',{}).get('reason',{}).get('error',{})
-                    if error.get('status')==401 or error.get('code')=='AUTH': job['result']='模型接口认证失败（401）：请检查项目 .env 中的 API 密钥是否属于当前公司网关，修改后重启服务。'
+                    if error.get('status')==401 or error.get('code')=='AUTH': job['result']='模型接口认证失败（401）：请检查项目 .env.vision 中的 API 密钥是否属于当前公司网关，修改后重启服务。'
                     if job.get('reader') and error.get('code')=='STREAM_CLOSED':job['result']='模型网关提前关闭了响应，材料已保留，请重新发送问题。'
         if job.get('material') and result.returncode and (p.parent/'review/error.json').is_file():
             job['result']=read(p.parent/'review/error.json')['error']
@@ -82,7 +79,7 @@ def execute(job):
             job['result']=read(p.parent/'workshop-error.json')['error']
         if job.get('application') and result.returncode!=0 and (p.parent/'application-error.json').exists():
             job['result']=read(p.parent/'application-error.json')['error']
-        if job.get('quickResearch') and result.returncode and (p.parent/'research-error.json').exists():
+        if (job.get('quickResearch') or job.get('plannedResearch')) and result.returncode and (p.parent/'research-error.json').exists():
             job['result']=read(p.parent/'research-error.json')['error']
         if job.get('standardization') and result.returncode and (p.parent/'standardization-error.json').is_file():
             job['result']=read(p.parent/'standardization-error.json')['error']
@@ -176,24 +173,43 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(state)
             except ValueError as error:
                 return self.respond({'error':str(error)},400)
+        if path.startswith('/api/research-plans'):
+            import research_planning as planning
+            from workshop_chat import list_drafts, library_item
+            parts=path.strip('/').split('/')
+            try:
+                if len(parts)==2:return self.respond(list_drafts(planning.BASE))
+                item=library_item(parts[2], planning.BASE)
+                if len(parts)==3:return self.respond(item)
+                kind=parts[3]
+                if kind=='handoff':
+                    data=planning.handoff(item)
+                    self.send_response(200)
+                    self.send_header('Content-Type','application/zip')
+                    self.send_header('Content-Disposition','attachment; filename="research-handoff.zip"')
+                    self.end_headers();self.wfile.write(data);return
+                if kind=='research_plan':return self.respond(item.get('research_plan',{}))
+                if kind=='versions' and len(parts)==5:
+                    return self.respond(read(planning.BASE/uuid.UUID(parts[2]).hex/'versions'/(str(int(parts[4]))+'.json')))
+                data=planning.export(item,kind)
+                self.send_response(200)
+                self.send_header('Content-Type','application/pdf' if kind=='pdf' else 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+                self.send_header('Content-Disposition','attachment; filename="research-plan.'+kind+'"; filename*=UTF-8\x27\x27%E7%A0%94%E7%A9%B6%E8%A7%84%E5%88%92.'+kind)
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except (ValueError,FileNotFoundError) as error:return self.respond({'error':str(error)},404)
         if path=='/api/workshop-library' or path.startswith('/api/workshop-library/'):
-            from workshop_chat import BASE, library_item
+            from workshop_chat import list_drafts, library_item
             try:
                 if path.endswith('workshop-library'):
-                    return self.respond([library_item(f.parent.name) for f in BASE.glob('*/saved')])
-                return self.respond(library_item(path.rsplit('/',1)[1]))
-            except ValueError as error:return self.respond({'error':str(error)},404)
-        if path.startswith('/api/workshop-preview/'):
-            from workshop_local import preview
-            try:
-                url=preview(path.rsplit('/',1)[1])
-            except (OSError,KeyError,ValueError):
-                return self.respond({'error':'本地预览暂不可打开，请返回工坊重试。'},404)
-            self.send_response(302)
-            self.send_header('Location',url)
-            self.send_header('Cache-Control','no-store')
-            self.end_headers()
-            return
+                    return self.respond(list_drafts())
+                parts=path.strip('/').split('/')
+                if len(parts)==5 and parts[3]=='versions':
+                    from workshop_chat import BASE
+                    return self.respond(read(BASE/uuid.UUID(parts[2]).hex/'versions'/(str(int(parts[4]))+'.json')))
+                return self.respond(library_item(parts[2]))
+            except (ValueError,FileNotFoundError) as error:return self.respond({'error':str(error)},404)
         if path.startswith('/api/workshop/'):
             import skill_workshop as workshop
             parts=path.split('/')
@@ -256,13 +272,16 @@ class Handler(BaseHTTPRequestHandler):
                     decisions=read(folder/'review-states.json') if (folder/'review-states.json').exists() else {}
                     if any(decisions.get(i['id'],'待复核')=='待复核' for i in read(report)['issues']):state='待复核'
                 add('office' if feature else 'research',job['id'],feature or '金融事件快评',title or feature,state,record.stat().st_mtime)
+            notebook_index=DATA/'thinkflow/outputs/local/_notebooks.json'
+            if notebook_index.is_file():
+                for notebook in read(notebook_index):
+                    add('knowledge',notebook['id'],'阅读助手',notebook['name'],'阅读笔记本',notebook_index.stat().st_mtime)
             for record in (DATA/'readers').glob('*/source.json'):
                 src=read(record)
                 if not src.get('learning'):add('knowledge',record.parent.name,'阅读助手',src['name'],'可继续阅读',record.stat().st_mtime)
-            from application_tools import listing
-            from datetime import datetime
-            for app in listing():
-                add('extend',app['id'],'我的工具',app['name'],'可使用',datetime.fromisoformat(app['updated_at']).timestamp())
+            from workshop_chat import BASE, list_drafts
+            for draft in list_drafts():
+                add('extend',draft['id'],'方案共创',draft['title'],'可继续编辑',(BASE/draft['id']/'state.json').stat().st_mtime)
             return self.respond(sorted(entries,key=lambda row:row['updated'],reverse=True))
         if path=='/api/work-history':
             entries=[]
@@ -291,7 +310,7 @@ class Handler(BaseHTTPRequestHandler):
             if job.get('material') and job['status']=='completed' and (p.parent/'outputs/材料体检.json').is_file():
                 job['materialReport']=read(p.parent/'outputs/材料体检.json')
                 job['reviewStates']=read(p.parent/'review-states.json') if (p.parent/'review-states.json').exists() else {}
-            if job.get('quickResearch') and job['status']=='running' and (p.parent/'research-progress.json').exists():job['result']=read(p.parent/'research-progress.json')['message']
+            if (job.get('quickResearch') or job.get('plannedResearch')) and job['status']=='running' and (p.parent/'research-progress.json').exists():job['result']=read(p.parent/'research-progress.json')['message']
             if job.get('screenshot') and job['status']=='completed' and (p.parent/'recognition/result.json').is_file():job['tableResult']=read(p.parent/'recognition/result.json')
             if job.get('comparison') and job['status']=='running' and (p.parent/'comparison/progress.json').exists():job['result']=read(p.parent/'comparison/progress.json')['message']
             if job.get('comparison') and (p.parent/'comparison/result.json').is_file():job['comparisonResult']=read(p.parent/'comparison/result.json')
@@ -335,9 +354,59 @@ class Handler(BaseHTTPRequestHandler):
         length=int(self.headers.get('Content-Length',0))
         if length>20*1024*1024: return self.respond({'error':'文件或请求超过 20 MB'},413)
         raw=self.rfile.read(length)
-        if self.path=='/api/workshop-chat':
+        if self.path=='/api/reader/import-url':
+            from urllib.request import Request, urlopen
+            from urllib.error import HTTPError
+            from thinkflow_bridge import URL
+            try:
+                request=Request(URL+'/marginalia-api/import-url',data=raw,headers={'Content-Type':'application/json'})
+                with urlopen(request,timeout=180) as response:
+                    return self.respond(json.load(response))
+            except HTTPError as error:
+                try:
+                    body=json.load(error)
+                    detail=body.get('detail') if isinstance(body,dict) else None
+                except ValueError:
+                    detail=None
+                return self.respond({'error':detail if isinstance(detail,str) else '请输入完整的文章链接。'},error.code)
+            except OSError:
+                return self.respond({'error':'阅读器连接超时，请稍后重试。'},502)
+        if self.path=='/api/planned-research':
+            import research_planning
+            from workshop_chat import library_item
+            try:
+                body=json.loads(raw)
+                state=library_item(body['threadId'],research_planning.BASE)
+                if state.get('version')!=body.get('version'):
+                    raise ValueError('方案已更新，请选择最新确认版本')
+                research_planning.handoff(state)
+                with SUBMIT_LOCK:
+                    tid=uuid.uuid5(uuid.NAMESPACE_URL,'zhixi/research/'+state['workshopThread']+'/'+str(state['version'])).hex
+                    folder=DATA/'tasks'/tid
+                    folder.mkdir(exist_ok=True)
+                    record=folder/'task.json'
+                    if record.exists() and read(record)['status'] in ('queued','running','completed'):
+                        return self.respond(read(record))
+                    save(folder/'confirmed-plan.json',state)
+                    job={'id':tid,'module':MODULES['research'],'prompt':state['title'],'plannedResearch':True,'status':'queued','result':''}
+                    save(record,job)
+                    threading.Thread(target=execute,args=(job,),daemon=True).start()
+                return self.respond(job,201)
+            except (ValueError,KeyError,TypeError,FileNotFoundError) as error:
+                return self.respond({'error':str(error)},400)
+        if self.path in ('/api/planning-answer','/api/planning-confirm'):
+            from planning_engine import answer_question, confirm_plan
+            try:
+                return self.respond((answer_question if self.path.endswith('answer') else confirm_plan)(json.loads(raw)))
+            except (ValueError,KeyError,TypeError,FileNotFoundError) as error:
+                return self.respond({'error':str(error)},400)
+        if self.path=='/api/workshop-stop':
+            from workshop_chat import stop_run
+            try:return self.respond(stop_run(str(json.loads(raw)['runId'])))
+            except (KeyError,ValueError,TypeError):return self.respond({'error':'无效会话'},400)
+        if self.path in ('/api/workshop-chat','/api/research-plan-chat'):
             from workshop_chat import run
-            return run(self,raw)
+            return run(self,raw,research=self.path.endswith("research-plan-chat"))
         if self.path=='/api/tasks':
             fingerprint=hashlib.sha256(raw).hexdigest()
             with SUBMIT_LOCK:
@@ -351,9 +420,6 @@ class Handler(BaseHTTPRequestHandler):
         return self.process_post(raw)
     def process_post(self,raw,fingerprint=None):
         try:
-            if self.path=='/api/workshop-library/save':
-                from workshop_chat import save_to_library
-                return self.respond(save_to_library(json.loads(raw)['id']))
             if self.path=='/api/research/discover':
                 from financial_quick_research import discover, notices
                 from lxml.etree import LxmlError
@@ -385,6 +451,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'items':list(links.values()),
                                      'failed':sum('error' in result for result in results),
                                      'channels':len(results)})
+            if self.path=='/api/thinkflow/import-result':
+                from thinkflow_bridge import import_result
+                payload=json.loads(raw)
+                return self.respond(import_result(payload['task'],payload['filename'],payload['notebook']))
+            if self.path=='/api/thinkflow/open':
+                from thinkflow_bridge import open_thinkflow
+                return self.respond(open_thinkflow(retry=json.loads(raw or '{}').get('retry') is True))
             if self.path in ('/api/interactive-database/open','/api/interactive-database/status'):
                 from database_bridge import open_database
                 return self.respond(open_database(check_only=self.path.endswith('/status')))
@@ -443,27 +516,6 @@ class Handler(BaseHTTPRequestHandler):
                     threading.Thread(target=execute,args=(job,),daemon=True).start()
                     return self.respond(job,201)
                 return self.respond({'error':'未知研究操作'},404)
-            if self.path.startswith('/api/applications/'):
-                import application_tools as apps
-                body=json.loads(raw)
-                action=self.path.rsplit('/',1)[1]
-                if action=='update':return self.respond(apps.update(body))
-                if action=='import':return self.respond(apps.store(body))
-                if action=='job':
-                    if not model_settings()[2]:raise ValueError('请先配置工作台模型')
-                    options,paths=apps.prepare(body)
-                    tid=uuid.uuid4().hex;folder=DATA/'tasks'/tid
-                    for name in ('inputs','outputs'):(folder/name).mkdir(parents=True,exist_ok=True)
-                    for source in paths:
-                        destination=folder/'inputs'/source.parent.name
-                        destination.mkdir()
-                        shutil.copy2(source,destination/source.name)
-                    save(folder/'application-options.json',options)
-                    job={'id':tid,'module':MODULES['extend'],'application':True,'prompt':'AI 工坊','status':'queued','result':''}
-                    save(folder/'task.json',job)
-                    threading.Thread(target=execute,args=(job,),daemon=True).start()
-                    return self.respond(job,201)
-                return self.respond({'error':'未知应用操作'},404)
             if self.path.startswith('/api/opinion/'):
                 import public_opinion as opinion
                 body=json.loads(raw)
@@ -509,40 +561,6 @@ class Handler(BaseHTTPRequestHandler):
                 save(folder/'task.json',job)
                 threading.Thread(target=execute,args=(job,),daemon=True).start()
                 return self.respond(job,201)
-            if self.path.startswith('/api/workshop/'):
-                import skill_workshop as workshop
-                body=json.loads(raw);action=self.path.split('/')[-1]
-                if action=='validate':return self.respond(workshop.validate(body.get('content')))
-                if action=='save':return self.respond(workshop.save_version(body.get('content'),body.get('label'),body.get('parent')))
-                if action=='import':
-                    fid=body.get('fileId')
-                    if not isinstance(fid,str) or len(fid)!=32 or not fid.isalnum():raise ValueError('无效上传文件')
-                    files=list((DATA/'uploads'/fid).glob('*'))
-                    if len(files)!=1:raise ValueError('上传文件不存在')
-                    content,assets=workshop.import_bundle(files[0])
-                    return self.respond(workshop.save_version(content,'原始导入',assets=assets),201)
-                if action=='probe':
-                    from mcp_bridge import invoke
-                    try:
-                        result=invoke(body.get('name'),'tools/list',{})
-                        return self.respond({'tools':[{'name':t['name'],'description':str(t.get('description') or '')[:500]} for t in result['tools']], 'hasMore':bool(result.get('nextCursor'))})
-                    except Exception:return self.respond({'error':'无法列出工具，请确认该连接已启用且服务可启动。'},400)
-                if action=='job':
-                    if not status()['sdk'] or not model_settings()[2]:raise ValueError('请先配置 Agent 模型接口')
-                    reference=None
-                    if body.get('referenceId') and body.get('action')=='create':
-                        from material_tools import extract
-                        source=extract(uploaded_material(body['referenceId']))
-                        reference={'name':source['name'],'text':'\n'.join(block['text'] for block in source['blocks'])[:12000]}
-                    options=workshop.job_options(body,reference)
-                    tid=uuid.uuid4().hex;folder=DATA/'tasks'/tid;folder.mkdir()
-                    (folder/'outputs').mkdir();(folder/'inputs').mkdir()
-                    save(folder/'workshop-options.json',options)
-                    job={'id':tid,'module':MODULES['extend'],'workshop':options['action'],'prompt':'Skill 创建助手','status':'queued','result':''}
-                    save(folder/'task.json',job)
-                    threading.Thread(target=execute,args=(job,),daemon=True).start()
-                    return self.respond(job,201)
-                raise ValueError('无效技能操作')
             if self.path.startswith('/api/reader/'):
                 import reader_tools as reader
                 body=json.loads(raw);action=self.path.split('/')[-1]
@@ -617,7 +635,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path=='/api/tasks':
                 body=json.loads(raw)
                 if not status()['sdk']: return self.respond({'error':'Harness SDK 尚未安装'},409)
-                if not model_settings()[2]: return self.respond({'error':'请先在项目 .env 中配置模型 API 密钥并重启服务'},409)
+                if not model_settings()[2]: return self.respond({'error':'请先在项目 .env.vision 中配置模型 API 密钥并重启服务'},409)
                 if body.get('module') not in MODULES or not str(body.get('prompt','')).strip(): raise ValueError('请选择模块并填写任务')
                 institution=body.get('institutionResearch')
                 institution_parent=None

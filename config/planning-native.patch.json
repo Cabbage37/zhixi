@@ -1,0 +1,10 @@
+[
+  {"id":"persistent-pwsh","disabled":true},
+  {"id":"persistent-bash","disabled":true},
+  {"insert":[
+    {"id":"zhixi-plan-mode","name":"@deepseek-ai/dsh-plan-mode","config":{"section":"Explore first, discuss intent and implementation, keep decisions and evidence explicit. Create a self-contained plan, never execute the planned deliverable. Use ask_user_question for consequential choices. Return the requested JSON draft for independent review; final confirmation is handled by the host."}},
+    {"id":"zhixi-commands","name":"@deepseek-ai/dsh-commands"},
+    {"id":"zhixi-user-questions","name":"@deepseek-ai/dsh-user-questions"},
+    {"id":"zhixi-ask-user","name":"@deepseek-ai/dsh-tool-ask-user"}
+  ]}
+]

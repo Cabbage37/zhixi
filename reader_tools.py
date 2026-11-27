@@ -1,7 +1,7 @@
 """Local reading sessions, pinned public URL import and verified source citations."""
 import http.client, ipaddress, json, re, shutil, socket, ssl, threading, uuid
 from pathlib import Path
-from urllib.parse import urlsplit, urljoin
+from urllib.parse import urlsplit, urljoin, urlencode
 
 ROOT = Path(__file__).resolve().parent
 BASE = ROOT / 'data/readers'
@@ -31,12 +31,34 @@ def public_address(url):
     port = u.port or (443 if u.scheme == 'https' else 80)
     if port not in (80, 443):
         raise ValueError('公开链接只支持标准网页端口')
-    addresses = socket.getaddrinfo(u.hostname, port, type=socket.SOCK_STREAM)
+    try:
+        addresses = socket.getaddrinfo(u.hostname, port, type=socket.SOCK_STREAM)
+    except OSError:
+        raise ValueError('无法解析网页地址，请检查网络或使用「粘贴正文」导入。') from None
+    # Some local VPNs return benchmark-range fake IPs. Resolve independently,
+    # then connect to the validated real IP; never connect to the fake address.
+    if addresses and all(ipaddress.ip_address(a[4][0]) in ipaddress.ip_network('198.18.0.0/15') for a in addresses):
+        try:
+            ipaddress.ip_address(u.hostname)
+        except ValueError:
+            resolver = http.client.HTTPSConnection('cloudflare-dns.com',443,timeout=12)
+            resolver._create_connection = lambda *a, **k: socket.create_connection(('1.1.1.1',443),timeout=12)
+            try:
+                resolver.request('GET','/dns-query?'+urlencode({'name':u.hostname,'type':'A'}),headers={'Accept':'application/dns-json'})
+                response=resolver.getresponse()
+                if response.status!=200: raise ValueError('公开域名核验失败，请稍后重试')
+                answer=json.loads(response.read(65536))
+                resolved=[row['data'] for row in answer.get('Answer',[]) if row.get('type')==1]
+                addresses=[(None,None,None,None,(address,port)) for address in resolved]
+            except (OSError,http.client.HTTPException,ValueError):
+                raise ValueError('当前代理使用虚拟 DNS，公开地址核验暂不可用；请稍后重试或导入本地文件') from None
+            finally:
+                resolver.close()
     if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global or ipaddress.ip_address(a[4][0]).is_multicast for a in addresses):
         raise ValueError('不能导入本机、内网或非公开地址')
     return u, port, addresses[0][4][0]
 
-def fetch_public(url):
+def fetch_public(url, max_bytes=10 * 1024 * 1024):
     for _ in range(6):
         u, port, address = public_address(url)
         cls = http.client.HTTPSConnection if u.scheme == 'https' else http.client.HTTPConnection
@@ -44,8 +66,14 @@ def fetch_public(url):
         # Pin the validated destination while preserving the original TLS hostname.
         conn._create_connection = lambda *a, **k: socket.create_connection((address, port), timeout=25)
         try:
-            conn.request('GET', (u.path or '/') + ('?' + u.query if u.query else ''),
-                         headers={'User-Agent': 'ZhixiReader/1.0', 'Accept-Encoding': 'identity'})
+            headers = {'User-Agent': 'ZhixiReader/1.0', 'Accept-Encoding': 'identity'}
+            if u.hostname == 'mp.weixin.qq.com':
+                headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml',
+                    'Accept-Language': 'zh-CN,zh;q=0.9',
+                })
+            conn.request('GET', (u.path or '/') + ('?' + u.query if u.query else ''), headers=headers)
             response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader('Location')
@@ -53,8 +81,8 @@ def fetch_public(url):
                 url = urljoin(url, location)
                 continue
             if response.status != 200: raise ValueError(f'网页访问失败（HTTP {response.status}），可上传本地文件')
-            data = response.read(10 * 1024 * 1024 + 1)
-            if len(data) > 10 * 1024 * 1024: raise ValueError('网页内容超过10MB，请上传精简文件')
+            data = response.read(max_bytes + 1)
+            if len(data) > max_bytes: raise ValueError('网页或文件超过读取限制，请上传精简文件')
             return url, response.getheader('Content-Type', ''), data
         except ssl.SSLCertVerificationError:
             raise ValueError('该网站的 HTTPS 证书链未获本机信任；请上传下载后的材料，或由管理员补齐受信任证书。') from None
@@ -76,6 +104,11 @@ def import_source(body):
             if 'application/pdf' in mime or raw.startswith(b'%PDF-'):
                 path = folder / 'source.pdf'
                 path.write_bytes(raw)
+            elif urlsplit(url).hostname == 'mp.weixin.qq.com' and ('text/html' in mime.lower() or 'application/xhtml' in mime.lower()):
+                from reader_import import decode_article
+                _, content = decode_article(raw, url)
+                path = folder / 'source.md'
+                path.write_text(content, encoding='utf-8')
             elif 'text/html' in mime:
                 from lxml import html
                 charset = re.search(r'charset\s*=\s*["\']?([\w-]+)', mime, re.I)
